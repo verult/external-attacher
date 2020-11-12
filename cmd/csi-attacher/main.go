@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -66,8 +67,11 @@ var (
 
 	reconcileSync = flag.Duration("reconcile-sync", 1*time.Minute, "Resync interval of the VolumeAttachment reconciler.")
 
+	// TODO (verult) update flag string to say it's mutually exclusive with server-address.
 	metricsAddress = flag.String("metrics-address", "", "The TCP network address where the prometheus metrics endpoint will listen (example: `:8080`). The default is empty string, which means metrics endpoint is disabled.")
 	metricsPath    = flag.String("metrics-path", "/metrics", "The HTTP path where prometheus metrics will be exposed. Default is `/metrics`.")
+
+	serverAddress = flag.String("server-address", "", "TODO (verult)")
 )
 
 var (
@@ -125,6 +129,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO (verult) comment
+	mux := http.NewServeMux()
+
 	// Find driver name.
 	ctx, cancel := context.WithTimeout(context.Background(), csiTimeout)
 	defer cancel()
@@ -135,7 +142,8 @@ func main() {
 	}
 	klog.V(2).Infof("CSI driver name: %q", csiAttacher)
 	metricsManager.SetDriverName(csiAttacher)
-	metricsManager.StartMetricsEndpoint(*metricsAddress, *metricsPath)
+	metricsManager.RegisterToServer(mux, *metricsPath)
+	// TODO (verult) make metricsAddress and serverAddress mutually exclusive
 
 	supportsService, err := supportsPluginControllerService(ctx, csiConn)
 	if err != nil {
@@ -194,6 +202,7 @@ func main() {
 	}
 
 	if !*enableLeaderElection {
+		runServer(mux, *serverAddress)
 		run(context.TODO())
 	} else {
 		// Create a new clientset for leader election. When the attacher
@@ -212,6 +221,9 @@ func main() {
 			le.WithNamespace(*leaderElectionNamespace)
 		}
 
+		le.RegisterHealthCheck(mux)
+
+		runServer(mux, *serverAddress)
 		if err := le.Run(); err != nil {
 			klog.Fatalf("failed to initialize leader election: %v", err)
 		}
@@ -252,4 +264,18 @@ func supportsPluginControllerService(ctx context.Context, csiConn *grpc.ClientCo
 	}
 
 	return caps[csi.PluginCapability_Service_CONTROLLER_SERVICE], nil
+}
+
+func runServer(mux *http.ServeMux, serverAddress string) {
+	if serverAddress == "" { return }
+
+	// Spawn a new go routine to listen on specified endpoint
+	go func() {
+		klog.Infof("ServeMux listening at %q", serverAddress)
+		err := http.ListenAndServe(serverAddress, mux)
+		if err != nil {
+			// TODO (verult) update message
+			klog.Fatalf("Failed to start prometheus metrics endpoint on specified address (%q) and path (%q): %s", metricsAddress, metricsPath, err)
+		}
+	}()
 }
